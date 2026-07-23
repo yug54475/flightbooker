@@ -11,7 +11,7 @@ def test_worked_example_success():
     # arrival_time_delta_small: arrival within 2hrs -> 1.0
     # Expected score = 0.3*0.7 + 0.3*1.0 + 0.2*1.0 + 0.2*1.0 = 0.91
     
-    score = compute_confidence_score(
+    score, sub_scores = compute_confidence_score(
         new_price=4910.00,
         original_price=4820.00,
         max_price_delta=150.00,
@@ -24,6 +24,10 @@ def test_worked_example_success():
         original_arrival_time_str="2026-07-23T09:05:00Z"
     )
     assert score == 0.91
+    assert sub_scores["price_delta_ok"] == 0.7
+    assert sub_scores["same_cabin"] == 1.0
+    assert sub_scores["loyalty_program_match"] == 1.0
+    assert sub_scores["arrival_time_delta_small"] == 1.0
 
 def test_cabin_downgrade_allowed():
     # Cabin business -> economy (downgrade)
@@ -33,7 +37,7 @@ def test_cabin_downgrade_allowed():
     # Arrival delta: < 2hrs -> 1.0
     # Expected score = 0.3*1.0 + 0.3*0.5 + 0.2*1.0 + 0.2*1.0 = 0.3 + 0.15 + 0.2 + 0.2 = 0.85
     
-    score = compute_confidence_score(
+    score, sub_scores = compute_confidence_score(
         new_price=4820.00,
         original_price=4820.00,
         max_price_delta=150.00,
@@ -46,6 +50,7 @@ def test_cabin_downgrade_allowed():
         original_arrival_time_str="2026-07-23T09:05:00Z"
     )
     assert score == 0.85
+    assert sub_scores["same_cabin"] == 0.5
 
 def test_cabin_downgrade_not_allowed():
     # Cabin business -> economy (downgrade)
@@ -55,7 +60,7 @@ def test_cabin_downgrade_not_allowed():
     # Arrival delta: < 2hrs -> 1.0
     # Expected score = 0.3*1.0 + 0.3*0.0 + 0.2*1.0 + 0.2*1.0 = 0.3 + 0.0 + 0.2 + 0.2 = 0.70
     
-    score = compute_confidence_score(
+    score, sub_scores = compute_confidence_score(
         new_price=4820.00,
         original_price=4820.00,
         max_price_delta=150.00,
@@ -68,6 +73,7 @@ def test_cabin_downgrade_not_allowed():
         original_arrival_time_str="2026-07-23T09:05:00Z"
     )
     assert score == 0.70
+    assert sub_scores["same_cabin"] == 0.0
 
 def test_loyalty_mismatch():
     # Carrier AF, program BA Executive Club -> loyalty score = 0.0
@@ -76,7 +82,7 @@ def test_loyalty_mismatch():
     # Arrival delta < 2hr -> arrival_time_delta_small = 1.0
     # Expected score = 0.3*1.0 + 0.3*1.0 + 0.2*0.0 + 0.2*1.0 = 0.80
     
-    score = compute_confidence_score(
+    score, sub_scores = compute_confidence_score(
         new_price=4820.00,
         original_price=4820.00,
         max_price_delta=150.00,
@@ -89,6 +95,7 @@ def test_loyalty_mismatch():
         original_arrival_time_str="2026-07-23T09:05:00Z"
     )
     assert score == 0.80
+    assert sub_scores["loyalty_program_match"] == 0.0
 
 def test_large_price_delta():
     # Price delta = +$400 vs $150 limit. Delta is > 2 * max_price_delta.
@@ -98,7 +105,7 @@ def test_large_price_delta():
     # Arrival delta < 2hr -> arrival_time_delta_small = 1.0
     # Expected score = 0.3*0.0 + 0.3*1.0 + 0.2*1.0 + 0.2*1.0 = 0.70
     
-    score = compute_confidence_score(
+    score, sub_scores = compute_confidence_score(
         new_price=5220.00,
         original_price=4820.00,
         max_price_delta=150.00,
@@ -111,3 +118,4 @@ def test_large_price_delta():
         original_arrival_time_str="2026-07-23T09:05:00Z"
     )
     assert score == 0.70
+    assert sub_scores["price_delta_ok"] == 0.0

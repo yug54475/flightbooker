@@ -2,7 +2,7 @@ import requests
 import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from agent.config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET
+from agent.config import AMADEUS_CLIENT_ID, AMADEUS_CLIENT_SECRET, http_session
 
 # Global cached token
 _cached_token: Optional[str] = None
@@ -28,7 +28,7 @@ def get_amadeus_token() -> Optional[str]:
     }
     
     try:
-        response = requests.post(url, data=data, timeout=8)
+        response = http_session.post(url, data=data, timeout=8)
         if response.status_code == 200:
             res_data = response.json()
             _cached_token = res_data.get("access_token")
@@ -69,16 +69,19 @@ def search_flight_alternatives(
             "departureDate": departure_date,
             "adults": 1,
             "travelClass": amadeus_cabin,
-            "nonStop": "false"
+            "nonStop": "true"  # Prefer direct flights for business travel rebookings (§2.4)
         }
         headers = {
             "Authorization": f"Bearer {token}"
         }
         
         try:
-            response = requests.get(url, params=params, headers=headers, timeout=8)
+            response = http_session.get(url, params=params, headers=headers, timeout=8)
             if response.status_code == 200:
-                return response.json().get("data", [])
+                results = response.json().get("data", [])
+                for r in results:
+                    r["search_source"] = "amadeus_real"
+                return results
             else:
                 print(f"Amadeus Flight search API returned status {response.status_code}: {response.text}")
         except Exception as e:
@@ -86,7 +89,10 @@ def search_flight_alternatives(
 
     # High-fidelity mock fallback
     print(f"Amadeus Client: Using realistic fallback flight offers for {origin}->{destination} on {departure_date} ({cabin_class})")
-    return _generate_mock_flight_offers(origin, destination, departure_date, cabin_class)
+    results = _generate_mock_flight_offers(origin, destination, departure_date, cabin_class)
+    for r in results:
+        r["search_source"] = "mock_fallback"
+    return results
 
 
 def _generate_mock_flight_offers(
@@ -260,20 +266,91 @@ def search_hotel_alternatives(
     check_out: str
 ) -> List[Dict[str, Any]]:
     """
-    Searches hotel alternatives. Returns a realistic mock response for hotel offers.
-    Since most disruptions are flight-only, this is primarily a mock placeholder to ensure tool coverage.
+    Searches hotel alternatives. Hits real Amadeus Hotel Search API if credentials are provided,
+    otherwise falls back to generating a realistic, high-fidelity mock hotelOffers list.
     """
-    # Simple high-fidelity mock list of hotel offers
-    print(f"Amadeus Client: Returning fallback hotel search results for city {city_code}")
+    token = get_amadeus_token()
+    
+    if token:
+        # Step 1: Query locations/hotels/by-city to find hotel IDs in the destination city
+        by_city_url = "https://test.api.amadeus.com/v1/reference-data/locations/hotels/by-city"
+        by_city_params = {
+            "cityCode": city_code,
+            "radius": 5,
+            "radiusUnit": "KM",
+            "hotelSource": "ALL"
+        }
+        headers = {
+            "Authorization": f"Bearer {token}"
+        }
+        
+        try:
+            city_resp = http_session.get(by_city_url, params=by_city_params, headers=headers, timeout=8)
+            if city_resp.status_code == 200:
+                hotels_data = city_resp.json().get("data", [])
+                hotel_ids = [h["hotelId"] for h in hotels_data[:3]] # Query up to 3 hotels
+                
+                if hotel_ids:
+                    # Step 2: Query shopping/hotel-offers for actual pricing
+                    offers_url = "https://test.api.amadeus.com/v3/shopping/hotel-offers"
+                    offers_params = {
+                        "hotelIds": ",".join(hotel_ids),
+                        "adults": 1,
+                        "checkInDate": check_in,
+                        "checkOutDate": check_out,
+                        "roomQuantity": 1
+                    }
+                    offers_resp = http_session.get(offers_url, params=offers_params, headers=headers, timeout=8)
+                    
+                    if offers_resp.status_code == 200:
+                        raw_offers = offers_resp.json().get("data", [])
+                        parsed_offers = []
+                        for h_off in raw_offers:
+                            h_id = h_off.get("hotel", {}).get("hotelId", "unknown")
+                            h_name = h_off.get("hotel", {}).get("name", "Boutique Hotel")
+                            offers_list = h_off.get("offers", [])
+                            if offers_list:
+                                rate = offers_list[0].get("price", {}).get("total", "150.00")
+                                parsed_offers.append({
+                                    "hotel_id": h_id,
+                                    "hotel_name": h_name,
+                                    "price": float(rate),
+                                    "check_in": check_in,
+                                    "check_out": check_out,
+                                    "search_source": "amadeus_real"
+                                })
+                        if parsed_offers:
+                            return parsed_offers
+            else:
+                print(f"Amadeus Hotel search API returned status {city_resp.status_code}: {city_resp.text}")
+        except Exception as e:
+            print(f"Amadeus Hotel search failed: {e}")
+
+    # Fallback to high-fidelity mock list of hotel offers
+    print(f"Amadeus Client: Returning fallback hotel search results for city {city_code} ({check_in} to {check_out})")
+    
+    # Map the city code to seeded hotel name for high-fidelity matching
+    fallback_hotel_name = "The Cadogan, London"
+    if city_code == "PAR":
+        fallback_hotel_name = "Le Marais Boutique, Paris"
+    elif city_code == "TYO":
+        fallback_hotel_name = "Park Hotel Tokyo"
+        
     return [
         {
             "hotel_id": f"AMAD-HTL-{city_code}-01",
-            "hotel_name": f"The Cadogan, {city_code}",
-            "price": "350.00"
+            "hotel_name": fallback_hotel_name,
+            "price": 350.00,
+            "check_in": check_in,
+            "check_out": check_out,
+            "search_source": "mock_fallback"
         },
         {
             "hotel_id": f"AMAD-HTL-{city_code}-02",
             "hotel_name": f"Park Hotel, {city_code}",
-            "price": "280.00"
+            "price": 280.00,
+            "check_in": check_in,
+            "check_out": check_out,
+            "search_source": "mock_fallback"
         }
     ]

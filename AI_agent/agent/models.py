@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 # ==========================================
 # Input Request Models (§2.1 / §4.4)
@@ -12,20 +12,22 @@ class FlightSegmentPayload(BaseModel):
     destination: str
     departure_time: str
     arrival_time: str
-    cabin_class: str
+    cabin_class: Literal["economy", "premium_economy", "business", "first"]
     loyalty_program: Optional[str] = None
     original_price: float
     booking_reference: Optional[str] = None
+    traveler_count: int = 1  # Modeled field to handle multiple passengers securely
 
 class UserPayload(BaseModel):
     id: str
-    card_tier: str
+    card_tier: Literal["premium", "mid", "entry"]
     card_token: str
+    name: str
     loyalty_program: Optional[str] = None
 
 class DisruptionEventPayload(BaseModel):
     id: str
-    type: str  # e.g., 'cancelled', 'delayed', 'missed_connection'
+    type: Literal["cancelled", "delayed", "missed_connection"]
     delay_minutes: Optional[int] = None
     flight_segment: FlightSegmentPayload
     user: UserPayload

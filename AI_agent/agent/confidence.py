@@ -110,4 +110,10 @@ def compute_confidence_score(
     a_score = get_arrival_time_delta_score(new_arrival, orig_arrival)
     
     raw_score = 0.3 * p_score + 0.3 * c_score + 0.2 * l_score + 0.2 * a_score
-    return round(raw_score, 2)
+    sub_scores = {
+        "price_delta_ok": p_score,
+        "same_cabin": c_score,
+        "loyalty_program_match": l_score,
+        "arrival_time_delta_small": a_score
+    }
+    return round(raw_score, 2), sub_scores
