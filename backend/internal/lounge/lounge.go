@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/yug54475/flightbooker/internal/db"
 )
 
@@ -41,7 +42,10 @@ func CheckAccess(ctx context.Context, cardTier, newAirportCode string) *LoungeRe
 		newAirportCode,
 	).Scan(&loungeType)
 	if err != nil {
-		// No lounge found at this airport
+		if err != pgx.ErrNoRows {
+			log.Printf("Warning: lounge lookup failed for %s: %v", newAirportCode, err)
+		}
+		// No lounge found at this airport (or lookup failed)
 		return &LoungeResult{
 			HasAccess:   false,
 			AirportCode: newAirportCode,
@@ -73,7 +77,7 @@ func AppendLoungeToReasoningSteps(existingSteps json.RawMessage, result *LoungeR
 	}
 
 	var steps []map[string]interface{}
-	if existingSteps != nil && len(existingSteps) > 0 {
+	if len(existingSteps) > 0 {
 		if err := json.Unmarshal(existingSteps, &steps); err != nil {
 			log.Printf("Warning: could not parse reasoning_steps for lounge annotation: %v", err)
 			return existingSteps

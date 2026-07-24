@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/yug54475/flightbooker/internal/auth"
+	"github.com/yug54475/flightbooker/internal/booking"
 	"github.com/yug54475/flightbooker/internal/db"
 	"github.com/yug54475/flightbooker/internal/models"
 	"github.com/yug54475/flightbooker/internal/validation"
@@ -25,11 +28,24 @@ func RespondToApproval(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Load the approval
+	callerID, ok := auth.GetUserID(ctx)
+	if !ok {
+		validation.WriteError(w, http.StatusUnauthorized, "unauthorized", "Could not identify caller.")
+		return
+	}
+
+	// Load the approval and verify ownership
 	var currentStatus, proposalID string
 	err := db.Pool.QueryRow(ctx,
-		"SELECT status, agent_proposal_id FROM approvals WHERE id = $1",
-		approvalID,
+		`SELECT a.status, a.agent_proposal_id
+		 FROM approvals a
+		 JOIN agent_proposals ap ON a.agent_proposal_id = ap.id
+		 JOIN jobs j ON ap.job_id = j.id
+		 JOIN disruption_events de ON j.disruption_event_id = de.id
+		 JOIN flight_segments fs ON de.flight_segment_id = fs.id
+		 JOIN itineraries i ON fs.itinerary_id = i.id
+		 WHERE a.id = $1 AND i.user_id = $2`,
+		approvalID, callerID,
 	).Scan(&currentStatus, &proposalID)
 	if err != nil {
 		validation.WriteError(w, http.StatusNotFound, "not_found", "Approval not found.")
@@ -73,8 +89,9 @@ func RespondToApproval(w http.ResponseWriter, r *http.Request) {
 	// If approved, trigger mock booking and create notification
 	if req.Decision == "approved" {
 		if err := triggerBookingAfterApproval(ctx, tx, proposalID); err != nil {
-			fmt.Printf("Warning: booking after approval failed: %v\n", err)
-			// Non-fatal for the approval itself
+			log.Printf("Booking after approval failed: %v", err)
+			validation.WriteError(w, http.StatusInternalServerError, "internal_error", "Booking failed after approval. Please try again.")
+			return
 		}
 	}
 
@@ -90,65 +107,47 @@ func RespondToApproval(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// triggerBookingAfterApproval creates a mock booking record and notification
+// triggerBookingAfterApproval creates mock booking records and notifications
 // after a member approves a pending proposal (§8).
-func triggerBookingAfterApproval(ctx context.Context, _ interface{}, proposalID string) error {
+func triggerBookingAfterApproval(ctx context.Context, tx pgx.Tx, proposalID string) error {
 	// Load proposal details to create booking
-	var proposedFlight json.RawMessage
+	var proposedFlight, proposedHotel json.RawMessage
 	var jobID string
-	err := db.Pool.QueryRow(ctx,
-		"SELECT proposed_flight_segment, job_id FROM agent_proposals WHERE id = $1",
+	err := tx.QueryRow(ctx,
+		"SELECT proposed_flight_segment, proposed_hotel_booking, job_id FROM agent_proposals WHERE id = $1",
 		proposalID,
-	).Scan(&proposedFlight, &jobID)
+	).Scan(&proposedFlight, &proposedHotel, &jobID)
 	if err != nil {
 		return fmt.Errorf("failed to load proposal: %w", err)
 	}
 
-	// Load user from job chain: proposal → job → disruption_event → flight_segment → itinerary → user
-	var userID, cardToken string
-	err = db.Pool.QueryRow(ctx,
-		`SELECT u.id, COALESCE(u.card_token, '')
+	flightNum, err := booking.ExecuteProposedBooking(ctx, tx, jobID, proposedFlight, proposedHotel)
+	if err != nil {
+		return err
+	}
+
+	// Load user for notification
+	var userID string
+	err = tx.QueryRow(ctx,
+		`SELECT i.user_id
 		 FROM jobs j
 		 JOIN disruption_events de ON j.disruption_event_id = de.id
 		 JOIN flight_segments fs ON de.flight_segment_id = fs.id
 		 JOIN itineraries i ON fs.itinerary_id = i.id
-		 JOIN users u ON i.user_id = u.id
 		 WHERE j.id = $1`, jobID,
-	).Scan(&userID, &cardToken)
+	).Scan(&userID)
 	if err != nil {
-		return fmt.Errorf("failed to load user for booking: %w", err)
+		return fmt.Errorf("failed to load user for notification: %w", err)
 	}
 
-	// Parse price from proposed flight segment
-	var flightData map[string]interface{}
-	if err := json.Unmarshal(proposedFlight, &flightData); err == nil {
-		price, _ := flightData["original_price"].(float64)
-		bookingRef, _ := flightData["booking_reference"].(string)
-		if bookingRef == "" {
-			bookingRef = fmt.Sprintf("MOCK-BK-%s", uuid.New().String()[:4])
-		}
+	message := fmt.Sprintf("Your rebooking has been confirmed. You are now on flight %s.", flightNum)
+	if proposedHotel != nil && string(proposedHotel) != "null" {
+		message = fmt.Sprintf("Your rebooking has been confirmed. You are now on flight %s, and your hotel has been updated.", flightNum)
+	}
 
-		// Create mock_bookings record
-		mockBookingID := uuid.New().String()
-		_, execErr := db.Pool.Exec(ctx,
-			`INSERT INTO mock_bookings (id, type, reference_code, external_offer_id, user_id, status, charged_amount, card_token)
-			 VALUES ($1, 'flight', $2, $3, $4, 'confirmed', $5, $6)`,
-			mockBookingID, bookingRef, "approved-offer", userID, price, cardToken)
-		if execErr != nil {
-			return fmt.Errorf("failed to insert mock booking: %w", execErr)
-		}
-
-		// Create rebooking_confirmed notification
-		flightNum, _ := flightData["flight_number"].(string)
-		notifID := uuid.New().String()
-		message := fmt.Sprintf("Your rebooking has been confirmed. You are now on flight %s.", flightNum)
-		_, execErr = db.Pool.Exec(ctx,
-			`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-			 VALUES ($1, $2, 'rebooking_confirmed', $3, 'push', $4)`,
-			notifID, userID, message, time.Now().UTC())
-		if execErr != nil {
-			return fmt.Errorf("failed to insert notification: %w", execErr)
-		}
+	_, execErr := db.InsertNotification(ctx, tx, userID, "rebooking_confirmed", message)
+	if execErr != nil {
+		return fmt.Errorf("failed to insert notification: %w", execErr)
 	}
 
 	return nil

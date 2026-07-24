@@ -146,7 +146,6 @@ func SimulateDisruption(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create notification — hard requirement per §11
-	notifID := uuid.New().String()
 	var message string
 	switch req.Type {
 	case "cancelled":
@@ -161,10 +160,7 @@ func SimulateDisruption(w http.ResponseWriter, r *http.Request) {
 		message = fmt.Sprintf("You may have missed your connection on flight %s (%s–%s).", flightNumber, origin, destination)
 	}
 
-	_, err = tx.Exec(ctx,
-		`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-		 VALUES ($1, $2, 'disruption_alert', $3, 'push', $4)`,
-		notifID, callerID, message, now)
+	notifID, err := db.InsertNotification(ctx, tx, callerID, "disruption_alert", message)
 	if err != nil {
 		validation.WriteError(w, http.StatusInternalServerError, "internal_error", "Failed to create notification.")
 		return

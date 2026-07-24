@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/yug54475/flightbooker/internal/auth"
 	"github.com/yug54475/flightbooker/internal/db"
 	"github.com/yug54475/flightbooker/internal/models"
 	"github.com/yug54475/flightbooker/internal/validation"
@@ -15,12 +16,22 @@ func GetAgentProposal(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	callerID, ok := auth.GetUserID(ctx)
+	if !ok {
+		validation.WriteError(w, http.StatusUnauthorized, "unauthorized", "Could not identify caller.")
+		return
+	}
+
 	var proposal models.AgentProposal
 	err := db.Pool.QueryRow(ctx,
 		`SELECT ap.id, ap.job_id, ap.proposed_flight_segment, ap.proposed_hotel_booking,
 		        ap.confidence_score, ap.reasoning_steps, ap.status, ap.created_at
 		 FROM agent_proposals ap
-		 WHERE ap.job_id = $1`, jobID,
+		 JOIN jobs j ON ap.job_id = j.id
+		 JOIN disruption_events de ON j.disruption_event_id = de.id
+		 JOIN flight_segments fs ON de.flight_segment_id = fs.id
+		 JOIN itineraries i ON fs.itinerary_id = i.id
+		 WHERE ap.job_id = $1 AND i.user_id = $2`, jobID, callerID,
 	).Scan(
 		&proposal.ID, &proposal.JobID,
 		&proposal.ProposedFlightSegment, &proposal.ProposedHotelBooking,

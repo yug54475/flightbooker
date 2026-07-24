@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/yug54475/flightbooker/internal/booking"
 	"github.com/yug54475/flightbooker/internal/db"
 )
 
@@ -36,7 +36,7 @@ func RunApprovalTimeoutTicker(ctx context.Context) {
 
 func checkExpiredApprovals(ctx context.Context) {
 	rows, err := db.Pool.Query(ctx,
-		`SELECT a.id, a.agent_proposal_id, ap.proposed_flight_segment, ap.job_id
+		`SELECT a.id, a.agent_proposal_id, ap.proposed_flight_segment, ap.proposed_hotel_booking, ap.job_id
 		 FROM approvals a
 		 JOIN agent_proposals ap ON a.agent_proposal_id = ap.id
 		 WHERE a.status = 'pending' AND a.expires_at < now()`)
@@ -48,18 +48,18 @@ func checkExpiredApprovals(ctx context.Context) {
 
 	for rows.Next() {
 		var approvalID, proposalID, jobID string
-		var proposedFlight json.RawMessage
-		if err := rows.Scan(&approvalID, &proposalID, &proposedFlight, &jobID); err != nil {
+		var proposedFlight, proposedHotel json.RawMessage
+		if err := rows.Scan(&approvalID, &proposalID, &proposedFlight, &proposedHotel, &jobID); err != nil {
 			log.Printf("Error scanning expired approval: %v", err)
 			continue
 		}
 
 		log.Printf("Approval %s has expired, auto-booking fallback...", approvalID)
-		handleExpiredApproval(ctx, approvalID, proposalID, proposedFlight, jobID)
+		handleExpiredApproval(ctx, approvalID, proposalID, proposedFlight, proposedHotel, jobID)
 	}
 }
 
-func handleExpiredApproval(ctx context.Context, approvalID, proposalID string, proposedFlight json.RawMessage, jobID string) {
+func handleExpiredApproval(ctx context.Context, approvalID, proposalID string, proposedFlight, proposedHotel json.RawMessage, jobID string) {
 	tx, err := db.Pool.Begin(ctx)
 	if err != nil {
 		log.Printf("Failed to begin transaction for expired approval: %v", err)
@@ -69,12 +69,16 @@ func handleExpiredApproval(ctx context.Context, approvalID, proposalID string, p
 
 	now := time.Now().UTC()
 
-	// 1. Set approval status to timed_out
-	_, err = tx.Exec(ctx,
-		"UPDATE approvals SET status = 'timed_out', responded_at = $1 WHERE id = $2",
+	// 1. Set approval status to timed_out (compare-and-swap)
+	tag, err := tx.Exec(ctx,
+		"UPDATE approvals SET status = 'timed_out', responded_at = $1 WHERE id = $2 AND status = 'pending'",
 		now, approvalID)
 	if err != nil {
 		log.Printf("Failed to update expired approval: %v", err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// another instance already claimed this approval — nothing to do
 		return
 	}
 
@@ -87,41 +91,31 @@ func handleExpiredApproval(ctx context.Context, approvalID, proposalID string, p
 		return
 	}
 
-	// 3. Find the user for this job chain
+	// 3. Execute the mock booking (which includes parsing, mock API calls, and flight segment update)
+	flightNum, err := booking.ExecuteProposedBooking(ctx, tx, jobID, proposedFlight, proposedHotel)
+
+	// 4. Create notification explaining the timeout and auto-booking
+	var message string
+	if err != nil {
+		message = "Your approval window expired, and we encountered an issue trying to automatically rebook you. We're still working on rebooking you and will follow up shortly."
+	} else {
+		message = fmt.Sprintf("Your approval window has expired. To avoid leaving you stranded, we've automatically rebooked you on %s. Contact us if you need changes.", flightNum)
+	}
+
+	// 5. Find the user for notification
 	var userID string
 	err = tx.QueryRow(ctx,
-		`SELECT u.id
+		`SELECT i.user_id
 		 FROM jobs j
 		 JOIN disruption_events de ON j.disruption_event_id = de.id
 		 JOIN flight_segments fs ON de.flight_segment_id = fs.id
 		 JOIN itineraries i ON fs.itinerary_id = i.id
-		 JOIN users u ON i.user_id = u.id
 		 WHERE j.id = $1`, jobID,
 	).Scan(&userID)
-	if err != nil {
-		log.Printf("Failed to find user for expired approval: %v", err)
-		return
-	}
-
-	// 4. Create notification explaining the timeout and auto-booking
-	flightNum := "the proposed alternative"
-	if proposedFlight != nil {
-		var seg map[string]interface{}
-		if json.Unmarshal(proposedFlight, &seg) == nil {
-			if fn, ok := seg["flight_number"].(string); ok {
-				flightNum = fn
-			}
-		}
-	}
-
-	notifID := uuid.New().String()
-	message := fmt.Sprintf("Your approval window has expired. To avoid leaving you stranded, we've automatically rebooked you on %s. Contact us if you need changes.", flightNum)
-	_, err = tx.Exec(ctx,
-		`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-		 VALUES ($1, $2, 'rebooking_confirmed', $3, 'push', $4)`,
-		notifID, userID, message, now)
-	if err != nil {
-		log.Printf("Failed to create timeout notification: %v", err)
+	if err == nil {
+		_, _ = db.InsertNotification(ctx, tx, userID, "rebooking_confirmed", message)
+	} else {
+		log.Printf("Failed to find user for timeout notification: %v", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

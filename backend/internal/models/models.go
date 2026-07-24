@@ -139,10 +139,10 @@ type InsuranceClaim struct {
 	DisruptionEventID string   `json:"disruption_event_id,omitempty"`
 	UserID            string   `json:"user_id,omitempty"`
 	Eligible          bool     `json:"eligible"`
-	ClaimType         *string  `json:"claim_type"`
-	Amount            *float64 `json:"amount"`
-	Status            string   `json:"status"`
-	CreatedAt         string   `json:"created_at,omitempty"`
+	ClaimType         *string    `json:"claim_type"`
+	Amount            *float64   `json:"amount"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"created_at,omitempty"`
 }
 
 // MockBooking represents a record of a mock booking made.
@@ -305,12 +305,13 @@ type MockFlightOrderResponseData struct {
 
 // MockHotelOrderRequest is the body for POST /mock/v1/booking/hotel-orders.
 type MockHotelOrderRequest struct {
-	HotelID   string `json:"hotel_id" validate:"required"`
-	HotelName string `json:"hotel_name" validate:"required"`
-	UserID    string `json:"user_id" validate:"required,uuid"`
-	CheckIn   string `json:"check_in" validate:"required"`
-	CheckOut  string `json:"check_out" validate:"required"`
-	CardToken string `json:"card_token" validate:"required"`
+	HotelID    string  `json:"hotel_id" validate:"required"`
+	HotelName  string  `json:"hotel_name" validate:"required"`
+	UserID     string  `json:"user_id" validate:"required,uuid"`
+	CheckIn    string  `json:"check_in" validate:"required"`
+	CheckOut   string  `json:"check_out" validate:"required"`
+	CardToken  string  `json:"card_token" validate:"required"`
+	TotalPrice float64 `json:"total_price" validate:"gte=0"`
 }
 
 // MockHotelOrderResponse is the response for hotel booking.

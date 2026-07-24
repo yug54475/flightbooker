@@ -73,7 +73,6 @@ func CheckEligibility(ctx context.Context, disruptionEventID, userID, cardTier, 
 
 	// If eligible, create a notification so the member hears about it immediately (§9)
 	if eligible {
-		notifID := uuid.New().String()
 		var message string
 		if claimType != nil {
 			switch *claimType {
@@ -84,10 +83,7 @@ func CheckEligibility(ctx context.Context, disruptionEventID, userID, cardTier, 
 			}
 		}
 
-		_, err = db.Pool.Exec(ctx,
-			`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-			 VALUES ($1, $2, 'insurance_eligible', $3, 'push', $4)`,
-			notifID, userID, message, time.Now().UTC())
+		_, err = db.InsertNotification(ctx, db.Pool, userID, "insurance_eligible", message)
 		if err != nil {
 			log.Printf("Warning: failed to create insurance notification: %v", err)
 			// Non-fatal — the claim itself was already recorded

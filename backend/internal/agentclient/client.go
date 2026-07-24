@@ -50,9 +50,8 @@ func CallAgent(ctx context.Context, request models.AgentPlanRequest) (*models.Ag
 		log.Printf("Agent call attempt %d failed: %v", attempt, err)
 	}
 
-	// All retries exhausted — fall back to mock response
-	log.Printf("All %d agent call attempts failed (%v), using fallback mock response", maxAttempts, lastErr)
-	return generateMockAgentResponse(request), nil
+	// All retries exhausted — return error so caller can mark job as failed per §4.2
+	return nil, fmt.Errorf("agent unreachable after %d attempts: %w", maxAttempts, lastErr)
 }
 
 func doAgentCall(ctx context.Context, endpoint string, body []byte) (*models.AgentPlanResponse, error) {

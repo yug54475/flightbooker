@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -19,6 +20,7 @@ var Client *sqs.Client
 
 // QueueURL is the SQS queue URL.
 var QueueURL string
+var DLQUrl string
 
 // SQSMessage is the minimal message format per §4.3.
 type SQSMessage struct {
@@ -39,14 +41,14 @@ func Init(ctx context.Context) error {
 	}
 
 	// Build custom config for LocalStack
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-			os.Getenv("AWS_ACCESS_KEY_ID"),
-			os.Getenv("AWS_SECRET_ACCESS_KEY"),
-			"",
-		)),
-	)
+	var cfgOpts []func(*config.LoadOptions) error
+	cfgOpts = append(cfgOpts, config.WithRegion(region))
+	if endpoint != "" {
+		cfgOpts = append(cfgOpts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider("test", "test", ""),
+		))
+	}
+	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}
@@ -59,11 +61,31 @@ func Init(ctx context.Context) error {
 	}
 	Client = sqs.NewFromConfig(cfg, opts)
 
+	// Create DLQ
+	dlqResult, err := Client.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String(queueName + "-dlq"),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create DLQ: %w", err)
+	}
+	DLQUrl = *dlqResult.QueueUrl
+
+	// Get DLQ ARN
+	attrResult, err := Client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl:       dlqResult.QueueUrl,
+		AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get DLQ attributes: %w", err)
+	}
+	dlqArn := attrResult.Attributes[string(types.QueueAttributeNameQueueArn)]
+
 	// Create queue if it doesn't exist (idempotent)
 	result, err := Client.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName: aws.String(queueName),
 		Attributes: map[string]string{
-			"VisibilityTimeout": "60", // §4.2: 60 seconds
+			"VisibilityTimeout": "90", // bumped to 90 seconds for retries
+			"RedrivePolicy":     fmt.Sprintf(`{"deadLetterTargetArn":"%s","maxReceiveCount":"3"}`, dlqArn),
 		},
 	})
 	if err != nil {
@@ -134,6 +156,7 @@ func Consume(ctx context.Context, handler func(ctx context.Context, msg SQSMessa
 				return // Context cancelled, normal shutdown
 			}
 			log.Printf("Error receiving SQS message: %v", err)
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
@@ -141,8 +164,7 @@ func Consume(ctx context.Context, handler func(ctx context.Context, msg SQSMessa
 			var msg SQSMessage
 			if err := json.Unmarshal([]byte(*sqsMsg.Body), &msg); err != nil {
 				log.Printf("Failed to unmarshal SQS message: %v", err)
-				// Delete the malformed message to prevent infinite redelivery
-				deleteMessage(ctx, *sqsMsg.ReceiptHandle)
+				// Don't delete — let it go to the DLQ after 3 failures
 				continue
 			}
 

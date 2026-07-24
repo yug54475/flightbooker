@@ -1,11 +1,9 @@
 package handlers
 
 import (
-	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/yug54475/flightbooker/internal/auth"
@@ -126,16 +124,4 @@ func Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// HashSeedPasswords is a utility to generate bcrypt hashes for seed data.
-// Called during startup to verify seed passwords work.
-func HashSeedPasswords() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
-	// Verify that seeded users can log in with "demo1234"
-	var count int
-	err := db.Pool.QueryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&count)
-	if err != nil {
-		fmt.Printf("Warning: could not verify seed users: %v\n", err)
-	}
-}

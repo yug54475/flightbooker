@@ -26,6 +26,8 @@ func ValidateStruct(s interface{}) error {
 
 	validationErrors, ok := err.(validator.ValidationErrors)
 	if !ok {
+		// Deliberate fallback: handles things like InvalidValidationError (e.g. validating a nil pointer).
+		// In these edge cases, returning the raw error avoids panics, though it won't have field-level formatting.
 		return err
 	}
 
@@ -59,11 +61,14 @@ func formatFieldError(e validator.FieldError) string {
 }
 
 // toSnakeCase converts PascalCase field names to snake_case for API responses.
+// Correctly handles acronyms like UserID -> user_id.
 func toSnakeCase(s string) string {
 	var result strings.Builder
-	for i, r := range s {
+	runes := []rune(s)
+	for i, r := range runes {
 		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
+			// only insert underscore if previous char was lowercase (i.e. genuine word boundary)
+			if i > 0 && runes[i-1] >= 'a' && runes[i-1] <= 'z' {
 				result.WriteRune('_')
 			}
 			result.WriteRune(r + 32)

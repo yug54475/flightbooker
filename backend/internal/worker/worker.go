@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/yug54475/flightbooker/internal/agentclient"
+	"github.com/yug54475/flightbooker/internal/booking"
 	"github.com/yug54475/flightbooker/internal/db"
 	"github.com/yug54475/flightbooker/internal/insurance"
 	"github.com/yug54475/flightbooker/internal/lounge"
@@ -30,6 +32,9 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 	if err == nil {
 		log.Printf("Job already exists for disruption %s (job=%s), skipping", msg.DisruptionEventID, existingJobID)
 		return nil // Already processed — SQS redelivery, safe to skip
+	}
+	if err != pgx.ErrNoRows {
+		log.Printf("Warning: idempotency check failed: %v", err)
 	}
 
 	// Step 2: Load disruption context from Postgres (single source of truth per §4.3)
@@ -84,13 +89,9 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 	}
 
 	// Step 4: Run insurance check (independent of confidence score, per §9)
-	go func() {
-		insCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := insurance.CheckEligibility(insCtx, msg.DisruptionEventID, userID, cardTier, disruptionType, delayMinutes); err != nil {
-			log.Printf("Insurance check failed: %v", err)
-		}
-	}()
+	if err := insurance.CheckEligibility(ctx, msg.DisruptionEventID, userID, cardTier, disruptionType, delayMinutes); err != nil {
+		log.Printf("Insurance check failed: %v", err)
+	}
 
 	// Step 5: Call AI agent (§4.4)
 	agentReq := models.AgentPlanRequest{
@@ -136,6 +137,7 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 	// Step 7: Check lounge access if airport changed (§10)
 	reasoningSteps := agentResp.ReasoningSteps
 	var proposedDestination string
+	var destLoungeResult *lounge.LoungeResult
 	if agentResp.ProposedFlightSegment != nil {
 		var seg map[string]interface{}
 		if json.Unmarshal(agentResp.ProposedFlightSegment, &seg) == nil {
@@ -148,8 +150,8 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 				reasoningSteps = lounge.AppendLoungeToReasoningSteps(reasoningSteps, loungeResult)
 			}
 			if proposedDestination != "" && proposedDestination != destination {
-				loungeResult := lounge.CheckAccess(ctx, cardTier, proposedDestination)
-				reasoningSteps = lounge.AppendLoungeToReasoningSteps(reasoningSteps, loungeResult)
+				destLoungeResult = lounge.CheckAccess(ctx, cardTier, proposedDestination)
+				reasoningSteps = lounge.AppendLoungeToReasoningSteps(reasoningSteps, destLoungeResult)
 			}
 		}
 	}
@@ -169,22 +171,34 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 		return fmt.Errorf("failed to store agent proposal: %w", err)
 	}
 
-	// Step 9: Handle based on status
 	if proposalStatus == "auto_approved" {
-		// Create rebooking_confirmed notification
-		flightNum := extractFlightNumber(agentResp.ProposedFlightSegment, flightNumber)
-		notifID := uuid.New().String()
-		message := fmt.Sprintf("You've been automatically rebooked on %s. Confidence: %.0f%%.", flightNum, agentResp.ConfidenceScore*100)
+		tx, txErr := db.Pool.Begin(ctx)
+		if txErr == nil {
+			flightNum, bErr := booking.ExecuteProposedBooking(ctx, tx, jobID, agentResp.ProposedFlightSegment, agentResp.ProposedHotelBooking)
 
-		if loungeResult := lounge.CheckAccess(ctx, cardTier, proposedDestination); loungeResult != nil && loungeResult.HasAccess {
-			message += " " + loungeResult.Message
+			if bErr == nil {
+				message := fmt.Sprintf("You've been automatically rebooked on %s. Confidence: %.0f%%.", flightNum, agentResp.ConfidenceScore*100)
+				if destLoungeResult != nil && destLoungeResult.HasAccess {
+					message += " " + destLoungeResult.Message
+				}
+				_, _ = db.InsertNotification(ctx, tx, userID, "rebooking_confirmed", message)
+
+				if commitErr := tx.Commit(ctx); commitErr != nil {
+					log.Printf("Failed to commit auto-booking tx: %v", commitErr)
+					failJob(ctx, jobID, "auto-booking commit failed: "+commitErr.Error())
+					sendReassurance(ctx, userID)
+				}
+			} else {
+				_ = tx.Rollback(ctx)
+				log.Printf("Warning: failed to execute auto-booking: %v", bErr)
+				failJob(ctx, jobID, "auto-booking failed: "+bErr.Error())
+				sendReassurance(ctx, userID)
+			}
+		} else {
+			log.Printf("Warning: failed to start tx for auto-booking: %v", txErr)
+			failJob(ctx, jobID, "auto-booking tx begin failed: "+txErr.Error())
+			sendReassurance(ctx, userID)
 		}
-
-		_, _ = db.Pool.Exec(ctx,
-			`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-			 VALUES ($1, $2, 'rebooking_confirmed', $3, 'push', $4)`,
-			notifID, userID, message, time.Now().UTC())
-
 	} else {
 		// Create approval row with 30-minute expiry (§7.1)
 		approvalID := uuid.New().String()
@@ -196,23 +210,27 @@ func HandleMessage(ctx context.Context, msg queue.SQSMessage, receiptHandle stri
 			 VALUES ($1, $2, 'pending', $3)`,
 			approvalID, proposalID, expiresAt)
 		if err != nil {
-			log.Printf("Warning: failed to create approval row: %v", err)
+			failJob(ctx, jobID, "failed to create approval row: "+err.Error())
+			return fmt.Errorf("failed to create approval row: %w", err)
 		}
 
 		// Create approval_request notification
-		flightNum := extractFlightNumber(agentResp.ProposedFlightSegment, flightNumber)
-		notifID := uuid.New().String()
-		message := fmt.Sprintf("We've found an alternative flight %s. Confidence: %.0f%%. Please review and approve within 30 minutes.", flightNum, agentResp.ConfidenceScore*100)
-		_, _ = db.Pool.Exec(ctx,
-			`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-			 VALUES ($1, $2, 'approval_request', $3, 'push', $4)`,
-			notifID, userID, message, time.Now().UTC())
+		var message string
+		if agentResp.ProposedFlightSegment == nil || string(agentResp.ProposedFlightSegment) == "null" {
+			message = "We couldn't find a viable alternative flight. Please review the options."
+		} else {
+			flightNum := extractFlightNumber(agentResp.ProposedFlightSegment, flightNumber)
+			message = fmt.Sprintf("We've found an alternative flight %s. Confidence: %.0f%%. Please review and approve within 30 minutes.", flightNum, agentResp.ConfidenceScore*100)
+		}
+		_, _ = db.InsertNotification(ctx, db.Pool, userID, "approval_request", message)
 	}
 
 	// Step 10: Mark job as completed
-	_, _ = db.Pool.Exec(ctx,
+	if _, updateErr := db.Pool.Exec(ctx,
 		"UPDATE jobs SET status = 'completed', updated_at = $1 WHERE id = $2",
-		time.Now().UTC(), jobID)
+		time.Now().UTC(), jobID); updateErr != nil {
+		log.Printf("Warning: failed to mark job %s as completed: %v", jobID, updateErr)
+	}
 
 	log.Printf("Successfully processed disruption %s → job %s, status=%s, confidence=%.3f",
 		msg.DisruptionEventID, jobID, proposalStatus, agentResp.ConfidenceScore)
@@ -229,12 +247,8 @@ func failJob(ctx context.Context, jobID, errMsg string) {
 
 // sendReassurance creates a reassurance notification per §4.2.
 func sendReassurance(ctx context.Context, userID string) {
-	notifID := uuid.New().String()
 	message := "We're still working on rebooking you — you won't be charged extra and we'll follow up shortly."
-	_, _ = db.Pool.Exec(ctx,
-		`INSERT INTO notifications (id, user_id, type, message, channel, sent_at)
-		 VALUES ($1, $2, 'reassurance', $3, 'push', $4)`,
-		notifID, userID, message, time.Now().UTC())
+	_, _ = db.InsertNotification(ctx, db.Pool, userID, "reassurance", message)
 }
 
 // extractFlightNumber tries to get the flight number from the proposed segment JSON.

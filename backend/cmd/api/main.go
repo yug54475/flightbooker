@@ -81,7 +81,7 @@ func main() {
 
 		// Disruptions
 		r.Get("/v1/disruptions/{user_id}", handlers.GetDisruptions)
-		r.Post("/v1/disruptions/simulate", handlers.SimulateDisruption)
+		r.Post("/internal/v1/disruptions/simulate", handlers.SimulateDisruption)
 
 		// Agent proposals
 		r.Get("/v1/agent-proposals/{job_id}", handlers.GetAgentProposal)
