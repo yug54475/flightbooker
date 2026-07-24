@@ -146,10 +146,10 @@ def _generate_mock_flight_offers(
         }],
         "price": {
             "currency": "USD",
-            "total": "4910.00",
+            "total": "5910.00",
             "base": "4000.00",
             "fees": [{"amount": "0.00", "type": "SUPPLIER"}],
-            "grandTotal": "4910.00"
+            "grandTotal": "5910.00"
         },
         "travelerPricings": [{
             "fareDetailsBySegment": [{

@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: flightbooker
       POSTGRES_DB: flightbooker
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,7 +19,7 @@ services:
       retries: 5
 
   localstack:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.4.0
     container_name: flightbooker-localstack
     environment:
       SERVICES: sqs

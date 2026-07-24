@@ -19,6 +19,7 @@ import (
 	"github.com/yug54475/flightbooker/internal/db"
 	"github.com/yug54475/flightbooker/internal/handlers"
 	"github.com/yug54475/flightbooker/internal/mockapi"
+	"github.com/yug54475/flightbooker/internal/queue"
 )
 
 func main() {
@@ -35,6 +36,12 @@ func main() {
 	}
 	defer db.Close()
 	log.Println("Connected to Postgres")
+
+	// Initialize SQS Queue
+	if err := queue.Init(ctx); err != nil {
+		log.Fatalf("Failed to initialize SQS: %v", err)
+	}
+	log.Println("Connected to SQS")
 
 	// Build router
 	r := chi.NewRouter()

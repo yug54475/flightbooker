@@ -46,7 +46,7 @@ export const getDisruptions = (userId: string, token: string) =>
 export const simulateDisruption = (
   body: SimulateDisruptionRequest,
   token: string,
-) => api.post<SimulateDisruptionResponse>('/v1/disruptions/simulate', body, token);
+) => api.post<SimulateDisruptionResponse>('/internal/v1/disruptions/simulate', body, token);
 
 // Agent proposals
 export const getAgentProposal = (jobId: string, token: string) =>

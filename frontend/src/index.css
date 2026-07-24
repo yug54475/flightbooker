@@ -791,9 +791,8 @@ a:hover { color: var(--text-primary); }
 .trace-step-desc {
   color: var(--text-secondary);
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .trace-step.active .trace-step-name {

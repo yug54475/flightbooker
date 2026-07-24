@@ -14,12 +14,9 @@ export function ReasoningTrace({ steps, isLive = false }: ReasoningTraceProps) {
   const prevStepLen = useRef(0);
 
   useEffect(() => {
-    if (steps.length === prevStepLen.current) return;
+    if (visibleCount >= steps.length) return;
 
-    // When we have more steps, stream each new one in with a delay
-    let i = prevStepLen.current;
-    prevStepLen.current = steps.length;
-
+    let i = visibleCount;
     const interval = setInterval(() => {
       i++;
       setVisibleCount(i);
