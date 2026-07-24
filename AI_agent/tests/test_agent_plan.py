@@ -1,18 +1,17 @@
+import copy
 import pytest
 import requests
 from unittest import mock
 from fastapi.testclient import TestClient
 
-from agent.main import app, completed_proposals_cache, processing_locks
+from agent.main import app
 from agent.config import cancelled_disruption_ids
 
 client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def clear_caches_and_locks():
-    """Autouse fixture to reset the FastAPI in-memory proposal caches and locks between tests."""
-    completed_proposals_cache.clear()
-    processing_locks.clear()
+    """Autouse fixture to reset the FastAPI timeout cancellation set between tests."""
     cancelled_disruption_ids.clear()
 
 SAMPLE_REQUEST_PAYLOAD = {
@@ -37,26 +36,15 @@ SAMPLE_REQUEST_PAYLOAD = {
       "card_tier": "premium",
       "card_token": "tok_demo_premium_001",
       "loyalty_program": "BA Executive Club",
-      "name": "Amir Khan"
+      "name": "Amir Khan",
+      "max_price_delta": 150.00,
+      "allow_cabin_downgrade": False
     }
   }
 }
 
 @mock.patch("agent.graph.book_flight")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_auto_approved_path(mock_connect, mock_book):
-    # Set up mock database connection (returning no hotel rows)
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    # First query is for user_policies, second is for hotel_bookings (which returns None)
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        None                      # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
-    
-    # Mock book_flight returning a valid reference and success status tuple
+def test_agent_plan_auto_approved_path(mock_book):
     mock_book.return_value = ("MOCK-BK-9182", "success")
     
     response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)
@@ -75,19 +63,11 @@ def test_agent_plan_auto_approved_path(mock_connect, mock_book):
     assert "synthetic fallback" in res_data["reasoning_steps"][0]["output"]
 
 @mock.patch("agent.graph.book_flight")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_pending_approval_path(mock_connect, mock_book):
-    # Set up mock database connection
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (50.00, False, 100.00), # user_policies
-        None                     # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
+def test_agent_plan_pending_approval_path(mock_book):
+    payload = copy.deepcopy(SAMPLE_REQUEST_PAYLOAD)
+    payload["disruption_event"]["user"]["max_price_delta"] = 50.00  # Lower limit forces pending approval
     
-    response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)
+    response = client.post("/agent/plan", json=payload)
     assert response.status_code == 200
     
     res_data = response.json()
@@ -99,18 +79,7 @@ def test_agent_plan_pending_approval_path(mock_connect, mock_book):
     mock_book.assert_not_called()
 
 @mock.patch("agent.graph.search_flight_alternatives")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_no_alternatives_found(mock_connect, mock_search):
-    # Set up mock database connection
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        None                      # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
-    
+def test_agent_plan_no_alternatives_found(mock_search):
     mock_search.return_value = []
     
     response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)
@@ -123,20 +92,9 @@ def test_agent_plan_no_alternatives_found(mock_connect, mock_search):
 
 @mock.patch("agent.graph.book_flight")
 @mock.patch("agent.graph.search_flight_alternatives")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_connecting_itinerary(mock_connect, mock_search, mock_book):
-    # Verify that a 2-segment connection is parsed correctly
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        None                      # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
+def test_agent_plan_connecting_itinerary(mock_search, mock_book):
     mock_book.return_value = ("MOCK-BK-9182", "success")
     
-    # Mocking Amadeus returning a 2-segment flight (JFK -> CDG -> LHR)
     mock_search.return_value = [
         {
             "type": "flight-offer",
@@ -174,22 +132,21 @@ def test_agent_plan_connecting_itinerary(mock_connect, mock_search, mock_book):
 
 @mock.patch("agent.graph.book_hotel")
 @mock.patch("agent.graph.book_flight")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_hotel_rebooking(mock_connect, mock_book_flight, mock_book_hotel):
-    # Set up mock database connection returning a hotel booking
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        ("hb-1234", "The Cadogan, London", "2026-07-29T15:00:00Z", "2026-08-01T11:00:00Z", "scheduled", "HTL-4471") # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
+def test_agent_plan_hotel_rebooking(mock_book_flight, mock_book_hotel):
+    payload = dict(SAMPLE_REQUEST_PAYLOAD)
+    payload["disruption_event"]["existing_hotel"] = {
+        "id": "hb-1234",
+        "hotel_name": "The Cadogan, London",
+        "check_in": "2026-07-29T15:00:00Z",
+        "check_out": "2026-08-01T11:00:00Z",
+        "status": "scheduled",
+        "booking_reference": "HTL-4471"
+    }
     
     mock_book_flight.return_value = ("MOCK-BK-FL", "success")
     mock_book_hotel.return_value = ("MOCK-BK-HTL", "success")
     
-    response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)
+    response = client.post("/agent/plan", json=payload)
     assert response.status_code == 200
     res_data = response.json()
     
@@ -200,43 +157,18 @@ def test_agent_plan_hotel_rebooking(mock_connect, mock_book_flight, mock_book_ho
     assert proposed_hotel["booking_reference"] == "MOCK-BK-HTL"
 
 @mock.patch("agent.graph.book_flight")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_timeout_cancellation(mock_connect, mock_book_flight):
-    # Set up mock database connection
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        None                      # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
-    
-    # Proactively register the disruption ID as timed out/cancelled (Issue 5)
+def test_agent_plan_timeout_cancellation(mock_book_flight):
     cancelled_disruption_ids.add("de-0001")
     
     response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)
     assert response.status_code == 200
     res_data = response.json()
     
-    # Flight segment should not have any booking reference because booking was aborted
     assert res_data["proposed_flight_segment"] is None
     mock_book_flight.assert_not_called()
 
 @mock.patch("agent.graph.book_flight")
-@mock.patch("agent.graph.psycopg2.connect")
-def test_agent_plan_booking_outage_propagation(mock_connect, mock_book):
-    # Test that connection outages during bookings propagate as 500 exceptions (Issue 1)
-    mock_conn = mock.MagicMock()
-    mock_cur = mock.MagicMock()
-    mock_cur.fetchone.side_effect = [
-        (150.00, False, 100.00), # user_policies
-        None                      # hotel_bookings
-    ]
-    mock_conn.cursor.return_value = mock_cur
-    mock_connect.return_value = mock_conn
-    
-    # Simulate a network/outage Exception
+def test_agent_plan_booking_outage_propagation(mock_book):
     mock_book.side_effect = requests.RequestException("Connection timed out to booking service")
     
     response = client.post("/agent/plan", json=SAMPLE_REQUEST_PAYLOAD)

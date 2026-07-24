@@ -10,9 +10,9 @@ CABIN_RANKS = {
 }
 
 def parse_iso_time(time_str: str) -> datetime:
-    """Parses ISO 8601 UTC timestamp string with Z suffix to a naive UTC datetime."""
+    """Parses ISO 8601 UTC timestamp string with Z or standard offsets safely (Issue 5)."""
     if time_str.endswith("Z"):
-        time_str = time_str[:-1]
+        time_str = time_str[:-1] + "+00:00"
     return datetime.fromisoformat(time_str)
 
 def get_cabin_match_score(new_cabin: str, original_cabin: str, allow_cabin_downgrade: bool) -> float:
@@ -96,9 +96,9 @@ def compute_confidence_score(
     loyalty_program: Optional[str],
     new_arrival_time_str: str,
     original_arrival_time_str: str
-) -> float:
+) -> tuple:
     """
-    Computes the total confidence score based on the §5 formula:
+    Computes the total confidence score based on the §7 formula:
     score = 0.3*price_delta_ok + 0.3*same_cabin + 0.2*loyalty_program_match + 0.2*arrival_time_delta_small
     """
     p_score = get_price_delta_score(Decimal(str(new_price)), Decimal(str(original_price)), Decimal(str(max_price_delta)))
@@ -109,11 +109,17 @@ def compute_confidence_score(
     orig_arrival = parse_iso_time(original_arrival_time_str)
     a_score = get_arrival_time_delta_score(new_arrival, orig_arrival)
     
-    raw_score = 0.3 * p_score + 0.3 * c_score + 0.2 * l_score + 0.2 * a_score
+    # Use Decimal arithmetic for the weighted sum per §0 (never float-round money/score fields)
+    raw_score = float(
+        Decimal("0.3") * Decimal(str(p_score))
+        + Decimal("0.3") * Decimal(str(c_score))
+        + Decimal("0.2") * Decimal(str(l_score))
+        + Decimal("0.2") * Decimal(str(a_score))
+    )
     sub_scores = {
         "price_delta_ok": p_score,
         "same_cabin": c_score,
         "loyalty_program_match": l_score,
         "arrival_time_delta_small": a_score
     }
-    return round(raw_score, 2), sub_scores
+    return round(raw_score, 3), sub_scores
