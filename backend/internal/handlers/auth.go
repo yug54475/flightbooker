@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/yug54475/flightbooker/internal/auth"
@@ -21,10 +22,11 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	email := strings.TrimSpace(strings.ToLower(req.Email))
 
 	// Check if email already exists
 	var exists bool
-	err := db.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)", req.Email).Scan(&exists)
+	err := db.Pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(email) = $1)", email).Scan(&exists)
 	if err != nil {
 		validation.WriteError(w, http.StatusInternalServerError, "internal_error", "Database error.")
 		return
@@ -55,7 +57,7 @@ func Signup(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.Exec(ctx,
 		`INSERT INTO users (id, name, email, card_tier, card_token, password_hash)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		userID, req.Name, req.Email, req.CardTier, cardToken, string(hash))
+		userID, strings.TrimSpace(req.Name), email, req.CardTier, cardToken, string(hash))
 	if err != nil {
 		validation.WriteError(w, http.StatusInternalServerError, "internal_error", "Failed to create user.")
 		return
@@ -97,10 +99,11 @@ func Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	email := strings.TrimSpace(strings.ToLower(req.Email))
 
 	var userID, passwordHash string
 	err := db.Pool.QueryRow(ctx,
-		"SELECT id, password_hash FROM users WHERE email = $1", req.Email,
+		"SELECT id, password_hash FROM users WHERE LOWER(email) = $1", email,
 	).Scan(&userID, &passwordHash)
 	if err != nil {
 		validation.WriteError(w, http.StatusUnauthorized, "unauthorized", "Invalid email or password.")
@@ -123,5 +126,3 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		UserID: userID,
 	})
 }
-
-
