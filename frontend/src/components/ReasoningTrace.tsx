@@ -11,7 +11,6 @@ interface ReasoningTraceProps {
 export function ReasoningTrace({ steps, isLive = false }: ReasoningTraceProps) {
   const [visibleCount, setVisibleCount] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const prevStepLen = useRef(0);
 
   useEffect(() => {
     if (visibleCount >= steps.length) return;
