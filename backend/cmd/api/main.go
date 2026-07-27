@@ -104,6 +104,9 @@ func main() {
 
 		// Insurance claims
 		r.Get("/v1/insurance-claims/{user_id}", handlers.GetInsuranceClaims)
+
+		// Demo reset (wipes disruption data so user can re-simulate)
+		r.Post("/internal/v1/demo/reset", handlers.ResetDemoData)
 	})
 
 	// Mock APIs (internal — only AI agent calls these, per §1)

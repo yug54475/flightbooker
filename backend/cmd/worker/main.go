@@ -50,6 +50,13 @@ func main() {
 		worker.RunApprovalTimeoutTicker(shutdownCtx)
 	}()
 
+	// Start orphan disruption scanner (self-healing for lost SQS messages)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		worker.RunOrphanDisruptionScanner(shutdownCtx)
+	}()
+
 	// Start SQS consumer
 	wg.Add(1)
 	go func() {
