@@ -1,6 +1,11 @@
 # Travel Disruption Concierge
 
-An intelligent agent that detects travel disruptions and autonomously rebooks flights, rearranges hotel stays, and notifies card members.
+An intelligent AI agent that detects travel disruptions and autonomously rebooks flights, rearranges hotel stays, and notifies card members — all in real time.
+
+## The Problem & Solution
+**The Problem:** When mass flight disruptions occur (e.g., severe weather), thousands of stranded travelers flood call centers simultaneously. This leads to hours-long hold times, high anxiety, and a terrible customer experience.
+
+**The Solution:** The Travel Disruption Concierge is a proactive, event-driven AI system. Instead of forcing passengers to call in, the system instantly detects flight cancellations via webhook, evaluates alternative flights using an AI agent constrained by the user's specific policy/tier, and autonomously rebooks them. Passengers receive an instant notification with their new itinerary before they even realize they were stranded.
 
 ## Project Structure
 
@@ -11,49 +16,121 @@ flightbooker/
 └── frontend/         # React + Vite frontend
 ```
 
-## Running the Application (Windows)
+## Prerequisites
 
-You will need to open **4 separate terminal windows** to run all the microservices concurrently.
+Make sure you have the following installed:
 
-### 1. Database and Infrastructure
-First, start the required background services (PostgreSQL, Redis, LocalStack SQS):
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for PostgreSQL, Redis, LocalStack)
+- [Go 1.21+](https://go.dev/dl/)
+- [Python 3.10+](https://www.python.org/downloads/)
+- [Node.js 18+](https://nodejs.org/) (includes npm)
+
+## Setup & Run
+
+You will need **4 separate terminal windows** to run all services.
+
+---
+
+### Step 1: Clone & Configure Environment
+
+```bash
+git clone https://github.com/yug54475/flightbooker.git
+cd flightbooker
+
+# Windows (PowerShell)
+copy backend\.env.example backend\.env
+copy AI_agent\.env.example AI_agent\.env
+
+# Mac / Linux (Bash)
+cp backend/.env.example backend/.env
+cp AI_agent/.env.example AI_agent/.env
+```
+
+The default `.env` values work out of the box for local development. No changes needed.
+
+---
+
+### Step 2: Start Infrastructure (Terminal 1)
+
+Start PostgreSQL, Redis, and LocalStack (SQS):
+
 ```powershell
 cd backend
 docker-compose up -d
 ```
-*Note: Postgres is mapped to port `5433` locally to avoid conflicts with existing Windows Postgres installations.*
 
-### 2. Python AI Agent
-In your second terminal, start the Python AI Agent:
+Wait a few seconds for containers to be healthy, then run database migrations.
+
+**For Windows (PowerShell):**
 ```powershell
-cd AI_agent
-# Activate your virtual environment if you have one setup
-# .\venv\Scripts\activate
-$env:PYTHONPATH="."
-uvicorn agent.main:app --host 127.0.0.1 --port 8001 --reload
+Get-Content migrations\000001_initial_schema.up.sql | docker exec -i flightbooker-postgres psql -U flightbooker -d flightbooker
+Get-Content migrations\000002_seed_data.up.sql | docker exec -i flightbooker-postgres psql -U flightbooker -d flightbooker
 ```
 
-### 3. Go Backend (API & Worker)
-In your third terminal, start the API server:
+**For Mac / Linux (Bash):**
+```bash
+cat migrations/000001_initial_schema.up.sql | docker exec -i flightbooker-postgres psql -U flightbooker -d flightbooker
+cat migrations/000002_seed_data.up.sql | docker exec -i flightbooker-postgres psql -U flightbooker -d flightbooker
+```
+
+---
+
+### Step 3: Start the AI Agent (Terminal 2)
+
+```bash
+cd AI_agent
+
+# Create virtual environment
+python -m venv venv
+
+# Activate it (Windows)
+.\venv\Scripts\activate
+# Activate it (Mac/Linux)
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Start the agent service (Windows PowerShell)
+$env:PYTHONPATH="." ; uvicorn agent.main:app --host 127.0.0.1 --port 8001 --reload
+
+# Start the agent service (Mac/Linux Bash)
+PYTHONPATH="." uvicorn agent.main:app --host 127.0.0.1 --port 8001 --reload
+```
+
+---
+
+### Step 4: Start the Go Backend (Terminals 3 & 4)
+
+**Terminal 3** — API Server:
 ```powershell
 cd backend
 go run ./cmd/api
 ```
-Open a new terminal tab (your fourth) and start the background worker:
+
+**Terminal 4** — Background Worker:
 ```powershell
 cd backend
 go run ./cmd/worker
 ```
 
-### 4. React Frontend
-In your final terminal, start the UI:
+---
+
+### Step 5: Start the Frontend (Terminal 5)
+
 ```powershell
 cd frontend
 npm install
 npm run dev
 ```
 
-## Seed Users (password: `demo1234`)
+Open **http://localhost:5173** in your browser.
+
+---
+
+## Demo Users
+
+All passwords are `demo1234`.
 
 | Name | Email | Card Tier |
 |---|---|---|
@@ -61,13 +138,28 @@ npm run dev
 | Sara Patel | sara@example.com | mid |
 | Jordan Lee | jordan@example.com | entry |
 
-## Ports & Architecture
+## How to Test
+
+1. Log in with any demo user.
+2. On the **Trips** page, click **"DEMO · Simulate disruption"** on any flight.
+3. The AI agent will evaluate alternatives, score confidence, and either auto-book or request your approval.
+4. Check the **Notifications** page for real-time updates.
+
+## Resetting the Demo
+
+If you have already simulated disruptions and want to start fresh to present the clean demo from the beginning, you no longer need to touch the database!
+
+1. Log in with your demo user.
+2. At the top right of the **Trips** page, click the **"↺ Reset Demo"** button.
+3. This instantly wipes out the AI's rebooking history and resets all flights for that user back to their original `scheduled` status.
+
+## Ports
 
 | Service | Port | Description |
 |---|---|---|
-| Backend API | 8000 | Main backend entrypoint |
-| AI Agent | 8001 | Python LangGraph service |
 | Frontend | 5173 | React web app |
-| Postgres | 5433 | Local mapping for the database |
-| Redis | 6379 | In-memory cache |
-| LocalStack | 4566 | Local SQS queues |
+| Backend API | 8000 | Go REST API |
+| AI Agent | 8001 | Python LangGraph service |
+| PostgreSQL | 5433 | Database (mapped from container 5432) |
+| Redis | 6379 | Cache |
+| LocalStack | 4566 | Local AWS SQS |

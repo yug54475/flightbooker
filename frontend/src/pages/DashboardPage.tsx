@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../store/auth';
-import { getItineraries, getDisruptions, simulateDisruption } from '../api/endpoints';
+import { getItineraries, getDisruptions, simulateDisruption, resetDemoData } from '../api/endpoints';
 import { useToast } from '../store/toast';
 import { FlightCard } from '../components/FlightCard';
 import { HotelCard } from '../components/HotelCard';
@@ -19,6 +19,17 @@ export function DashboardPage() {
   const { token, userId, user } = useAuth();
   const { showError, showSuccess } = useToast();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  const resetMutation = useMutation({
+    mutationFn: () => resetDemoData(token!),
+    onSuccess: () => {
+      showSuccess('Demo data reset! You can simulate disruptions again.');
+      queryClient.invalidateQueries({ queryKey: ['itineraries', userId] });
+      queryClient.invalidateQueries({ queryKey: ['disruptions', userId] });
+    },
+    onError: (err: Error) => showError(err.message),
+  });
 
   const {
     data: itineraries,
@@ -70,6 +81,15 @@ export function DashboardPage() {
             {trips.length} {trips.length === 1 ? 'itinerary' : 'itineraries'} on file
           </p>
         </div>
+        <button
+          className="simulate-btn"
+          onClick={() => resetMutation.mutate()}
+          disabled={resetMutation.isPending}
+          title="Reset all disruption data so you can simulate again"
+          id="reset-demo-btn"
+        >
+          {resetMutation.isPending ? 'Resetting…' : '↺ Reset Demo'}
+        </button>
       </div>
 
       {disruptionsError && (

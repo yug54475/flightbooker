@@ -75,3 +75,7 @@ export const getNotifications = (userId: string, token: string) =>
 // Insurance claims
 export const getInsuranceClaims = (userId: string, token: string) =>
   api.get<InsuranceClaim[]>(`/v1/insurance-claims/${userId}`, token);
+
+// Demo reset
+export const resetDemoData = (token: string) =>
+  api.post<{ message: string }>('/internal/v1/demo/reset', {}, token);
